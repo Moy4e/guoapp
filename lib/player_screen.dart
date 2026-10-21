@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -14,7 +13,6 @@ import 'app_orientation.dart';
 import 'app_theme.dart';
 import 'core_bridge.dart';
 import 'diary_service.dart';
-import 'luna_exo_player.dart';
 import 'danmaku_controller.dart';
 import 'danmaku_overlay.dart';
 import 'download_picker.dart';
@@ -123,6 +121,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   bool _pictureInPictureRequested = false;
   bool _pictureInPictureHandlerInstalled = false;
   AppLifecycleState _lifecycleState = AppLifecycleState.resumed;
+  Timer? _hardwareDecodeWatch;
   String _loadingMessage = '正在准备播放';
   String? _error;
   String? _saveWarning;
@@ -195,15 +194,13 @@ class _PlayerScreenState extends State<PlayerScreen>
     widget.store.addListener(_accessChanged);
     _player =
         widget.playerFactory?.call() ??
-        (Platform.isAndroid
-            ? LunaExoPlayer()
-            : Player(
-                configuration: const PlayerConfiguration(
-                  bufferSize: 32 * 1024 * 1024,
-                  logLevel: MPVLogLevel.error,
-                ),
-              ));
-    _video = widget.videoBuilder == null && !Platform.isAndroid
+        Player(
+          configuration: const PlayerConfiguration(
+            bufferSize: 32 * 1024 * 1024,
+            logLevel: MPVLogLevel.error,
+          ),
+        );
+    _video = widget.videoBuilder == null
         ? VideoController(
             _player,
             configuration: VideoControllerConfiguration(
@@ -493,6 +490,29 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (visible && _pendingError) {
       _queueRecovery();
     }
+  }
+
+  /// 硬件解码自愈：部分机型 mediacodec 初始化成功但解不出画面（黑屏/花屏，
+  /// 声音正常）。播放 8 秒后若时间在走但仍无视频尺寸，切回软件解码并回到原位。
+  void _watchHardwareDecode() {
+    _hardwareDecodeWatch?.cancel();
+    if (!Platform.isAndroid || _television) return;
+    _hardwareDecodeWatch = Timer(const Duration(seconds: 8), () async {
+      if (_closed || !_foreground) return;
+      final state = _player.state;
+      if (!state.playing || state.position <= Duration.zero) return;
+      if ((state.width ?? 0) > 0 && (state.height ?? 0) > 0) return;
+      final platform = _player.platform;
+      if (platform is! NativePlayer) return;
+      DiaryService.add('[Play] 硬解 8 秒无画面，回退软件解码');
+      try {
+        await platform.setProperty('hwdec', 'no');
+        await _player.seek(state.position);
+        if (_playIntent && _foreground) await _player.play();
+      } catch (_) {
+        // 回退失败时保持现有播放，交由播放恢复逻辑处理。
+      }
+    });
   }
 
   void _attachLanPlayback() {
@@ -979,7 +999,9 @@ class _PlayerScreenState extends State<PlayerScreen>
               await platform.setProperty('demuxer-max-back-bytes', '${1 * 1024 * 1024}');
               await platform.setProperty('demuxer-readahead-secs', '5');
             } else {
-              await platform.setProperty('hwdec', 'auto-safe');
+              // 方案 A：MediaCodec 硬解（解码后拷贝回 GPU），兼容性优于零拷贝直出，
+              // 且保留 mpv 的亮度/色彩增强；个别机型不支持时由 mpv 自动降级软解。
+              await platform.setProperty('hwdec', 'mediacodec-copy');
               await platform.setProperty('hwdec-codecs', 'all');
               await platform.setProperty('vd-lavc-skiploopfilter', 'nonkey');
               await platform.setProperty('vd-lavc-threads', '4');
@@ -1021,6 +1043,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           return;
         }
         _openedIndex = index;
+        _watchHardwareDecode();
         _enhancement.mediaReady();
         _attachLanPlayback();
         _health.reset();
@@ -1442,6 +1465,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     _healthTimer?.cancel();
     _errorTimer?.cancel();
     _pictureInPictureExitTimer?.cancel();
+    _hardwareDecodeWatch?.cancel();
     if (_pictureInPictureHandlerInstalled) {
       AppDevice.channel.setMethodCallHandler(null);
     }
@@ -1721,12 +1745,6 @@ class _PlayerScreenState extends State<PlayerScreen>
             children: [
               if (widget.videoBuilder != null)
                 widget.videoBuilder!(layeredControls)
-              else if (_player is LunaExoPlayer)
-                LunaExoVideoView(
-                  player: _player as LunaExoPlayer,
-                  fit: _videoFit,
-                  controls: (_) => layeredControls,
-                )
               else
                 Video(
                   controller: _video!,
