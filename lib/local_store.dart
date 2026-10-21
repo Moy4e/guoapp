@@ -162,7 +162,8 @@ class LocalStore extends ChangeNotifier {
         RegExp(r'^[a-f0-9]{32}$').hasMatch(salt) &&
         RegExp(r'^[a-f0-9]{64}$').hasMatch(hash);
     _gateEnabled = valid;
-    _gateOff = !valid && off;
+    // 未设置密码（含全新安装）时默认展示全部站源；设置密码后才启用隐藏。
+    _gateOff = !valid && (off || !enabled);
     _gateSalt = valid ? salt : '';
     _gateHash = valid ? hash : '';
     _sourcesUnlocked = false;

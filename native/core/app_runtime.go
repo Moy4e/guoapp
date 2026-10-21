@@ -177,6 +177,8 @@ type nativeEngine struct {
 	sourceRecords    map[string]nativeSourceRecord
 	sourceCatalogMu  sync.Mutex
 	sourceCatalogs   map[string]chan struct{}
+	routeLatencyMu   sync.Mutex
+	routeLatencies   map[string]routeLatencyEntry
 }
 
 var nativeState struct {
@@ -276,7 +278,7 @@ func newNativeEngine(directory string) (*nativeEngine, error) {
 			}
 			return nil
 		}}
-	engine := &nativeEngine{downloader: d, directory: directory, catalogs: map[string][]nativeDrama{}, catalogStates: map[string]nativeCatalogState{}}
+	engine := &nativeEngine{downloader: d, directory: directory, catalogs: map[string][]nativeDrama{}, catalogStates: map[string]nativeCatalogState{}, routeLatencies: map[string]routeLatencyEntry{}}
 	engine.loadResourceSettings()
 	d.loadRankingCache()
 	engine.loadCatalogCache()
@@ -787,6 +789,16 @@ func (engine *nativeEngine) nativeResolve(ctx context.Context, input nativeInput
 	choice := nativePlaybackChoices(media, input.Quality)
 	if series, video, valid := hongguoPlaybackIDs(task); valid {
 		choice.danmakuSeries, choice.danmakuVideo = series, video
+	}
+	engine.nativeRankRoutes(&choice)
+	if len(choice.media) > 1 {
+		if _, ok := engine.routeLatency(nativeRouteKey(choice.media[0])); ok {
+			go engine.probeRoutes(choice, 0)
+		} else {
+			// 首次播放还没有测速结果，先花一小段时间并发探测各线路，再挑最快的起播。
+			engine.probeRoutes(choice, routeProbeBudget)
+			engine.nativeRankRoutes(&choice)
+		}
 	}
 	return engine.nativeOpenPlayback(ctx, choice)
 }

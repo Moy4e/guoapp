@@ -155,8 +155,9 @@ class LunaExoPlayer implements Player {
           'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36';
     }
 
-    bool isHls = url.toLowerCase().contains('.m3u8') ||
-        url.toLowerCase().contains('hls') ||
+    final lowerUrl = url.toLowerCase();
+    bool isHls = lowerUrl.contains('.m3u8') ||
+        lowerUrl.contains('hls') ||
         (headers['accept']?.contains('mpegurl') ?? false);
 
     final uri = Uri.tryParse(url);
@@ -165,25 +166,30 @@ class LunaExoPlayer implements Player {
       throw Exception('无效的播放地址: $url');
     }
 
-    // 先导探测：如果尚未显式判定为 HLS，向网络地址快速嗅探前置响应头与内容，智能识别
-    if (!isHls && uri != null && (uri.scheme == 'http' || uri.scheme == 'https')) {
-      try {
-        final client = HttpClient()..connectionTimeout = const Duration(seconds: 3);
-        final req = await client.getUrl(uri);
-        headers.forEach((k, v) => req.headers.set(k, v));
-        req.headers.set('Range', 'bytes=0-512');
-        final resp = await req.close();
-        final cType = resp.headers.contentType?.toString().toLowerCase() ?? '';
-        final chunks = await resp.take(1).toList();
-        final firstChunk = chunks.isNotEmpty ? String.fromCharCodes(chunks.first) : '';
-        DiaryService.add('[Sniff] 探测结果: status=${resp.statusCode}, contentType=$cType, prefix=${firstChunk.length > 20 ? firstChunk.substring(0, 20) : firstChunk}');
-        if (cType.contains('mpegurl') || firstChunk.contains('#EXTM3U')) {
-          isHls = true;
-          DiaryService.add('[Sniff] 自动识别为 HLS 流，注入 formatHint: VideoFormat.hls');
-        }
-        client.close(force: true);
-      } catch (e) {
-        DiaryService.add('[Sniff] 探测警告 (非致命): $e');
+    // 本机流媒体代理（Go 核心）已经在路径扩展名里标明了类型，直接判定，
+    // 省掉一次探测往返，起播更快。
+    final host = uri?.host.toLowerCase() ?? '';
+    final isLoopback = host == '127.0.0.1' || host == '::1' || host == 'localhost';
+    final proxyPath = uri?.path.toLowerCase() ?? '';
+    bool sniffResolved = false;
+    if (!isHls && isLoopback) {
+      if (proxyPath.endsWith('.m3u8')) {
+        isHls = true;
+        sniffResolved = true;
+      } else if (proxyPath.endsWith('.mp4') ||
+          proxyPath.endsWith('.m4s') ||
+          proxyPath.endsWith('.ts')) {
+        sniffResolved = true;
+      }
+    }
+
+    // 仍未判定时才做网络探测：复用连接、限时 1.8s，失败不影响起播
+    if (!isHls && !sniffResolved && uri != null &&
+        (uri.scheme == 'http' || uri.scheme == 'https')) {
+      final detected = await _sniffHls(uri, headers);
+      if (detected != null) {
+        isHls = detected;
+        DiaryService.add('[Sniff] 探测判定 isHls=$isHls');
       }
     }
 
@@ -321,6 +327,92 @@ class LunaExoPlayer implements Player {
       } catch (_) {}
     }
     revision.value++;
+  }
+
+  static HttpClient? _sniffClient;
+
+  static HttpClient _sharedSniffClient() {
+    return _sniffClient ??= HttpClient()
+      ..connectionTimeout = const Duration(milliseconds: 1500)
+      ..idleTimeout = const Duration(seconds: 10)
+      ..maxConnectionsPerHost = 4;
+  }
+
+  /// 探测媒体地址是否为 HLS，返回 null 表示未能判定（不阻塞起播）。
+  static Future<bool?> _sniffHls(Uri uri, Map<String, String> headers) async {
+    const Duration budget = Duration(milliseconds: 1800);
+    try {
+      final HttpClient client = _sharedSniffClient();
+      // 先 HEAD：无响应体、连接可复用，开销最小
+      final bool? head = await _sniffOnce(client, uri, headers, head: true)
+          .timeout(budget, onTimeout: () => null);
+      if (head != null) {
+        return head;
+      }
+      return await _sniffOnce(client, uri, headers, head: false)
+          .timeout(budget, onTimeout: () => null);
+    } catch (e) {
+      DiaryService.add('[Sniff] 探测警告 (非致命): $e');
+      return null;
+    }
+  }
+
+  static Future<bool?> _sniffOnce(
+    HttpClient client,
+    Uri uri,
+    Map<String, String> headers, {
+    required bool head,
+  }) async {
+    final HttpClientRequest request =
+        head ? await client.headUrl(uri) : await client.getUrl(uri);
+    headers.forEach((String key, String value) => request.headers.set(key, value));
+    if (!head) {
+      request.headers.set('Range', 'bytes=0-512');
+    }
+    final HttpClientResponse response = await request.close();
+    final int status = response.statusCode;
+    final String contentType =
+        response.headers.contentType?.toString().toLowerCase() ?? '';
+    if (status >= 400) {
+      _sniffDiscard(response, head);
+      return null;
+    }
+    if (contentType.contains('mpegurl')) {
+      _sniffDiscard(response, head);
+      return true;
+    }
+    if (contentType.contains('mp4') ||
+        contentType.contains('video/') ||
+        contentType.contains('audio/')) {
+      _sniffDiscard(response, head);
+      return false;
+    }
+    if (head) {
+      return null;
+    }
+    final List<List<int>> chunks = await response.take(1).toList();
+    final String firstChunk =
+        chunks.isNotEmpty ? String.fromCharCodes(chunks.first) : '';
+    DiaryService.add(
+        '[Sniff] 探测结果: status=$status, contentType=$contentType, prefix=${firstChunk.length > 20 ? firstChunk.substring(0, 20) : firstChunk}');
+    _sniffDiscard(response, false);
+    if (firstChunk.contains('#EXTM3U')) {
+      return true;
+    }
+    return false;
+  }
+
+  /// 直接丢弃未读完的响应体并关闭连接，避免为了复用而下载整个视频。
+  static void _sniffDiscard(HttpClientResponse response, bool head) {
+    if (head) {
+      return;
+    }
+    try {
+      response
+          .detachSocket()
+          .then((Socket socket) => socket.destroy())
+          .catchError((Object _) {});
+    } catch (_) {}
   }
 
   void _startPositionPolling() {
@@ -538,18 +630,32 @@ class LunaExoVideoView extends StatelessWidget {
           fit: StackFit.expand,
           children: [
             if (hasVideo)
-              Center(
-                child: AspectRatio(
-                  aspectRatio: ratio,
-                  child: VideoPlayer(c),
-                ),
-              )
+              _buildSurface(c, ratio)
             else
               const ColoredBox(color: Colors.black),
             if (controls != null) controls!(context),
           ],
         );
       },
+    );
+  }
+
+  /// 按 [fit] 摆放画面：contain 保持原始比例居中，其余模式交由 FittedBox 缩放/裁切。
+  Widget _buildSurface(VideoPlayerController c, double ratio) {
+    if (fit == BoxFit.contain) {
+      return Center(child: AspectRatio(aspectRatio: ratio, child: VideoPlayer(c)));
+    }
+    const double height = 100;
+    return SizedBox.expand(
+      child: FittedBox(
+        fit: fit,
+        alignment: Alignment.center,
+        child: SizedBox(
+          width: ratio * height,
+          height: height,
+          child: VideoPlayer(c),
+        ),
+      ),
     );
   }
 }

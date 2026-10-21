@@ -341,6 +341,17 @@ func (stream *nativeStreamServer) nativeServe(writer http.ResponseWriter, reques
 	}
 	writer.WriteHeader(response.StatusCode)
 	if request.Method == http.MethodGet {
-		_, _ = io.Copy(writer, reader)
+		// 用更大的缓冲向上游取数据，减少小包写入次数，提升弱网下的吞吐。
+		pointer := nativeStreamCopyPool.Get().(*[]byte)
+		// 屏蔽 src 的 WriteTo 与 dst 的 ReaderFrom，确保使用上面的大缓冲。
+		_, _ = io.CopyBuffer(struct{ io.Writer }{writer}, struct{ io.Reader }{reader}, *pointer)
+		nativeStreamCopyPool.Put(pointer)
 	}
 }
+
+const nativeStreamCopyBuffer = 128 << 10
+
+var nativeStreamCopyPool = sync.Pool{New: func() any {
+	buffer := make([]byte, nativeStreamCopyBuffer)
+	return &buffer
+}}

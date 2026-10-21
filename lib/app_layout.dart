@@ -6,7 +6,7 @@ import 'package:flutter/services.dart';
 
 export 'app_build.dart';
 
-const appVersion = '0.2.64';
+const appVersion = '0.2.67';
 
 ThemeData televisionTheme(ThemeData theme) {
   final colors = theme.colorScheme;
@@ -98,6 +98,15 @@ class AppDevice {
     if (defaultTargetPlatform != TargetPlatform.android) return;
     try {
       await channel.invokeMethod('resetBrightness');
+    } catch (_) {}
+  }
+
+  /// 播放时常亮：借 FLAG_KEEP_SCREEN_ON 让窗口可见期间屏幕不熄灭，
+  /// 不受系统省电策略的自动息屏/降亮度影响
+  static Future<void> setKeepScreenOn(bool enabled) async {
+    if (defaultTargetPlatform != TargetPlatform.android) return;
+    try {
+      await channel.invokeMethod('setKeepScreenOn', {'enabled': enabled});
     } catch (_) {}
   }
 }
