@@ -109,6 +109,13 @@ Flutter 多端独立短剧 / 影视应用，原名「短剧库 APP」。站源�
 - **顶栏液态玻璃**：新增 `LiquidGlassPanel` 通栏玻璃面板与 `LiquidGlassStyle.top`（直角通栏），首页顶栏在液态玻璃开启时获得与底栏一致的透镜折射质感（tint 0.45，可透视列表内容）；着色器不可用时退化为纯模糊。
 - **底栏与三点菜单互换**：底栏最右侧由「下载」改为「设置」（点按直接推设置页，不抢当前 tab 选中态），「下载」移入右上角三点菜单（仅在有下载权限时显示），TV 侧栏与桌面 Rail 同步互换。
 
+### 液态玻璃效果链对齐 Kyant0/AndroidLiquidGlass（0.2.71+78）
+
+- **模糊改为真实高斯**：原着色器内十字 5 抽头等效 sigma 仅 ~1.4px，远弱于 SukiSU `blur(4dp)`（按 AOSP 换算 sigma = 0.57735·radius + 0.5）。现移除 `u_blur_radius` 与抽头模糊，改由 `ImageFilter.compose(outer: shader, inner: blur)` 在上游做真实高斯，sigma 按同一公式换算；着色器只负责透镜折射与色散。
+- **色散强度对齐**：Kyant0 `Lens.kt` 将 chromaticAberration 作布尔量传入（uniform 恒 1f），原实现传 0.5 只有一半强度，现改为 1（`u_chromatic_aberration` 按 >0 量化）。
+- **逐行核对确认无偏差项**：负折射符号（`refractionAmount` 取负）与我方一致；vibrancy（`saturation 1.5×`）等价；辉光层级（bar 高光 0.75 → InteractiveHighlight → 隐形行捕获 → pill 最上层）与 SukiSU `FloatingBottomBar.kt` 的 `combinedBackdrop` 语义一致。
+- **动效核对**：指针 / 六弹簧（press、value、scaleX/Y、velocity）与 `DampedDragAnimation.kt` 逐条一致（velocity = 速度 / span 且每帧 snap、release 待 |value-target| < span·0.025 才归零按压与缩放）；色散 A/B 与透镜位移经截图量化验证（色散仅激活于透镜带、右缘位移 ~7-8px）。
+
 ## 安装包与平台状态
 
 | 平台 | 包与状态 |

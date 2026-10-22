@@ -6,9 +6,12 @@
 // （https://github.com/Kyant0/AndroidLiquidGlass ，Apache-2.0）。
 //
 // 在 Flutter 侧经 BackdropFilter + ImageFilter.shader 作用于玻璃区域背后的
-// 内容：先做饱和度提升（vibrancy）与轻度高斯模糊，再按圆角矩形 SDF 对边缘
-// 带做透镜折射（可选深度折射与色散）。玻璃区域向外扩张的部分由本着色器裁掉
-// （形状外输出全透明），扩张区域只为给折射提供可采样的背景内容。
+// 内容：先做饱和度提升（vibrancy），再按圆角矩形 SDF 对边缘带做透镜折射
+// （可选深度折射与色散）。背景高斯模糊由滤镜链上游的 ImageFilter.blur 完成
+// （ImageFilter.compose 组合 blur→shader，对齐 Kyant0 的 vibrancy→blur→lens
+// 效果链与 AOSP convertRadiusToSigma 的 sigma 换算）。玻璃区域向外扩张的
+// 部分由本着色器裁掉（形状外输出全透明），扩张区域只为给折射提供可采样的
+// 背景内容。
 //
 // 注意：ImageFilter.shader 要求第一个 uniform 为 vec2（引擎注入绑定纹理尺寸），
 // 且至少一个 sampler2D（引擎注入滤镜输入）。
@@ -32,9 +35,8 @@ uniform vec4 u_corner_radii;        // 圆角半径：左上、右上、右下�
 uniform float u_refraction_height;  // 折射作用的边缘带宽度，设备像素
 uniform float u_refraction_amount;  // 折射位移量，设备像素
 uniform float u_depth_effect;       // 0/1：深度折射（向形状中心牵引）
-uniform float u_chromatic_aberration; // 色散强度，0 为关闭
+uniform float u_chromatic_aberration; // 色散强度，0 为关闭（Kyant0 作布尔量，启用时传 1）
 uniform float u_vibrancy;           // 0/1：饱和度提升至 1.5 倍
-uniform float u_blur_radius;        // 背景模糊半径（3x3 高斯间距），设备像素
 
 uniform sampler2D u_texture_input;
 
@@ -82,25 +84,12 @@ vec3 applyVibrancy(vec3 color) {
     return mix(vec3(luma), color, 1.5);
 }
 
-// 采样背景内容；u_blur_radius > 0 时叠加 3x3 高斯（权重 1-2-1 / 16）。
+// 采样背景内容（模糊由上游 ImageFilter.blur 真高斯完成，见
+// [LiquidGlassShaders.filterFor]：与 Kyant0 的 vibrancy→blur→lens 链一致，
+// 本函数只做饱和度提升；色散路径会多次调用本函数，单次采样保证成本）。
 vec4 sampleBackground(vec2 coord) {
     vec4 center = texture(u_texture_input, texCoordOf(coord));
-    if (u_blur_radius < 0.75) {
-        return vec4(applyVibrancy(center.rgb), center.a);
-    }
-    float r = u_blur_radius;
-    vec3 sum = center.rgb * 4.0;
-    float weight = 4.0;
-    sum += texture(u_texture_input, texCoordOf(coord + vec2(-r, -r))).rgb;
-    sum += texture(u_texture_input, texCoordOf(coord + vec2(0.0, -r))).rgb * 2.0;
-    sum += texture(u_texture_input, texCoordOf(coord + vec2(r, -r))).rgb;
-    sum += texture(u_texture_input, texCoordOf(coord + vec2(-r, 0.0))).rgb * 2.0;
-    sum += texture(u_texture_input, texCoordOf(coord + vec2(r, 0.0))).rgb * 2.0;
-    sum += texture(u_texture_input, texCoordOf(coord + vec2(-r, r))).rgb;
-    sum += texture(u_texture_input, texCoordOf(coord + vec2(0.0, r))).rgb * 2.0;
-    sum += texture(u_texture_input, texCoordOf(coord + vec2(r, r))).rgb;
-    weight += 12.0;
-    return vec4(applyVibrancy(sum / weight), center.a);
+    return vec4(applyVibrancy(center.rgb), center.a);
 }
 
 void main() {

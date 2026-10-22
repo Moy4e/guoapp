@@ -46,6 +46,10 @@ class LiquidGlassStyle {
   final double refractionHeight;
 
   /// 折射位移量。
+  ///
+  /// 注意：Kyant0/AndroidLiquidGlass 与 SukiSU-Ultra 均传入**负值**
+  /// （`setFloatUniform("refractionAmount", -refractionAmount)`），折射采样
+  /// 点相对当前像素向形状内侧偏移；正值方向相反。Dart 层统一传负值。
   final double refractionAmount;
 
   /// 深度折射：折射方向额外向形状中心牵引。
@@ -59,6 +63,24 @@ class LiquidGlassStyle {
 
   /// 背景模糊半径。
   final double blurRadius;
+
+  LiquidGlassStyle copyWith({
+    double? cornerRadius,
+    double? refractionHeight,
+    double? refractionAmount,
+    bool? depthEffect,
+    double? chromaticAberration,
+    bool? vibrancy,
+    double? blurRadius,
+  }) => LiquidGlassStyle(
+    cornerRadius: cornerRadius ?? this.cornerRadius,
+    refractionHeight: refractionHeight ?? this.refractionHeight,
+    refractionAmount: refractionAmount ?? this.refractionAmount,
+    depthEffect: depthEffect ?? this.depthEffect,
+    chromaticAberration: chromaticAberration ?? this.chromaticAberration,
+    vibrancy: vibrancy ?? this.vibrancy,
+    blurRadius: blurRadius ?? this.blurRadius,
+  );
 
   /// 底栏玻璃面（SukiSU `FloatingBottomBar` 基础层参数）。
   static const bar = LiquidGlassStyle(
@@ -74,14 +96,19 @@ class LiquidGlassStyle {
     refractionAmount: 24,
   );
 
-  /// 选中项玻璃 pill（SukiSU 拖动 pill 参数，取稳态值）。
-  static const pill = LiquidGlassStyle(
-    cornerRadius: 28,
-    refractionHeight: 10,
-    refractionAmount: 14,
-    depthEffect: true,
-    chromaticAberration: 0.5,
-  );
+  /// 选中项玻璃 pill 的**按压动画**参数（SukiSU 拖动 pill 参数，随按压
+  /// 进度 0→1 线性出现）：lens(10dp·p, 14dp·p) + depthEffect + 色散。
+  /// 色散对齐 Kyant0：作布尔量启用，着色器 uniform 传 1f。
+  static LiquidGlassStyle pillAt(double pressProgress) {
+    final p = pressProgress.clamp(0.0, 1.0);
+    return LiquidGlassStyle(
+      cornerRadius: 28,
+      refractionHeight: 10 * p,
+      refractionAmount: 14 * p,
+      depthEffect: true,
+      chromaticAberration: 1,
+    );
+  }
 }
 
 /// 透镜着色器的加载与 uniform 管理。
@@ -143,12 +170,37 @@ class LiquidGlassShaders {
         shader.getUniformFloat('u_corner_radii', i).set(r);
       }
       set('u_refraction_height', style.refractionHeight * dpr);
-      set('u_refraction_amount', style.refractionAmount * dpr);
+      // 与 Kyant0 / SukiSU 一致传负值：折射采样点向形状内侧偏移。
+      set('u_refraction_amount', -style.refractionAmount * dpr);
       set('u_depth_effect', style.depthEffect ? 1 : 0);
-      set('u_chromatic_aberration', style.chromaticAberration);
+      // Kyant0 lens() 将 chromaticAberration 作布尔量：着色器 uniform 恒传
+      // 1f（见 Lens.kt setFloatUniform("chromaticAberration", 1f)）。
+      set('u_chromatic_aberration', style.chromaticAberration > 0 ? 1 : 0);
       set('u_vibrancy', style.vibrancy ? 1 : 0);
-      set('u_blur_radius', style.blurRadius * dpr);
-      final filter = ui.ImageFilter.shader(shader);
+      final shaderFilter = ui.ImageFilter.shader(shader);
+      // 背景模糊：ImageFilter.compose(outer: shader, inner: blur) —— 先真高斯
+      // 模糊再透镜折射，与 Kyant0 效果链（vibrancy→blur→lens）一致。sigma 按
+      // AOSP Blur::convertRadiusToSigma：0.57735*radius + 0.5（radius 为设备
+      // 像素）；Impeller 对 sigma>4 自动降采样，成本可控。
+      if (style.blurRadius <= 0) {
+        _cache[slot] = _CachedFilter(key, shaderFilter);
+        return shaderFilter;
+      }
+      final sigma = 0.57735 * style.blurRadius * dpr + 0.5;
+      ui.ImageFilter filter;
+      try {
+        filter = ui.ImageFilter.compose(
+          outer: shaderFilter,
+          inner: ui.ImageFilter.blur(
+            sigmaX: sigma,
+            sigmaY: sigma,
+            tileMode: ui.TileMode.clamp,
+          ),
+        );
+      } catch (_) {
+        // 组合不可用（极少数后端）时退回纯着色器：无模糊但透镜/色散仍生效。
+        filter = shaderFilter;
+      }
       _cache[slot] = _CachedFilter(key, filter);
       return filter;
     } catch (_) {
@@ -192,24 +244,34 @@ class _CachedFilter {
 /// 因此形状中心必须由本组件在布局完成后经 `localToGlobal` 取得并传入着色器
 /// （见 [LiquidGlassShaders.filterFor]）；首帧位置未知时不渲染，避免玻璃
 /// 闪现在错误位置。
+///
+/// 形状位置随动画逐帧变化时（如选中 pill 的滑动），自行测量会有一帧延迟，
+/// 玻璃形状将滞后于视觉位置；此类场景应由调用方直接传入 [shapeCenter]
+/// （屏幕坐标，逻辑像素），跳过自测量。
 class LiquidGlassSurface extends StatefulWidget {
   const LiquidGlassSurface({
     super.key,
     required this.slot,
     required this.style,
     required this.shapeSize,
+    this.shapeCenter,
   });
 
   final String slot;
   final LiquidGlassStyle style;
   final Size shapeSize;
 
+  /// 形状中心在根视图（屏幕）坐标系中的逻辑像素位置。
+  ///
+  /// 为 null 时组件自行测量（存在一帧延迟）；非 null 时直接使用。
+  final Offset? shapeCenter;
+
   @override
   State<LiquidGlassSurface> createState() => _LiquidGlassSurfaceState();
 }
 
 class _LiquidGlassSurfaceState extends State<LiquidGlassSurface> {
-  /// 形状中心在根视图（屏幕）坐标系中的逻辑像素位置。
+  /// 形状中心在根视图（屏幕）坐标系中的逻辑像素位置（自测量路径）。
   Offset? _shapeCenter;
 
   @override
@@ -222,6 +284,8 @@ class _LiquidGlassSurfaceState extends State<LiquidGlassSurface> {
   void _schedulePositionUpdate() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
+      // 调用方显式传入中心时（动画场景）无需自测量。
+      if (widget.shapeCenter != null) return;
       final box = context.findRenderObject();
       if (box is RenderBox && box.hasSize && box.size != Size.zero) {
         final center = box.localToGlobal(box.size.center(Offset.zero));
@@ -236,7 +300,8 @@ class _LiquidGlassSurfaceState extends State<LiquidGlassSurface> {
 
   @override
   Widget build(BuildContext context) {
-    final center = _shapeCenter;
+    // 调用方显式传入中心时（动画场景），不依赖自测量，避免一帧延迟。
+    final center = widget.shapeCenter ?? _shapeCenter;
     if (center == null) return const SizedBox.shrink();
     final filter = LiquidGlassShaders.filterFor(
       widget.slot,
@@ -258,6 +323,9 @@ class _LiquidGlassSurfaceState extends State<LiquidGlassSurface> {
 }
 
 /// 玻璃容器色（SukiSU 的 `surfaceContainer @ 0.4`），裁剪在形状内。
+///
+/// [overlay] 为叠加在 [color] 之上的第二层颜色（已含目标 alpha），用于
+/// SukiSU pill 的按压双色 surface（黑 3%·按压进度）。
 class GlassTint extends StatelessWidget {
   const GlassTint({
     super.key,
@@ -265,26 +333,48 @@ class GlassTint extends StatelessWidget {
     required this.radius,
     required this.color,
     this.shadowColor,
+    this.overlay,
   });
 
   final Size size;
   final double radius;
   final Color color;
   final Color? shadowColor;
+  final Color? overlay;
 
   @override
   Widget build(BuildContext context) => SizedBox(
     width: size.width,
     height: size.height,
-    child: DecoratedBox(
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(radius),
-        color: color,
-        boxShadow: shadowColor == null
-            ? null
-            : [BoxShadow(color: shadowColor!, blurRadius: 10)],
-      ),
-    ),
+    child: overlay == null
+        ? DecoratedBox(
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(radius),
+              color: color,
+              boxShadow: shadowColor == null
+                  ? null
+                  : [BoxShadow(color: shadowColor!, blurRadius: 10)],
+            ),
+          )
+        : Stack(
+            children: [
+              DecoratedBox(
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(radius),
+                  color: color,
+                  boxShadow: shadowColor == null
+                      ? null
+                      : [BoxShadow(color: shadowColor!, blurRadius: 10)],
+                ),
+              ),
+              DecoratedBox(
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(radius),
+                  color: overlay,
+                ),
+              ),
+            ],
+          ),
   );
 }
 
@@ -376,86 +466,137 @@ class _RimHighlightPainter extends CustomPainter {
       old.secondaryAlpha != secondaryAlpha;
 }
 
-/// 形状内侧的柔和阴影：SukiSU `InnerShadow`（偏移 + 高斯模糊 + 反相裁剪）的移植。
+/// 形状内侧的柔和阴影：SukiSU `InnerShadow`（形状填充 − 偏移形状反相清除 +
+/// 高斯模糊 + 图层 alpha）的移植。
+///
+/// 默认偏移向下一个模糊半径，阴影带出现在形状上侧内缘（光源在上方）。
 class GlassInnerShadow extends StatelessWidget {
   const GlassInnerShadow({
     super.key,
     required this.size,
     required this.radius,
-    this.offset = const Offset(0, 8),
+    this.blurRadius = 8,
     this.color = const Color(0x26000000),
+    this.alpha = 1,
+    this.offset,
   });
 
   final Size size;
+
+  /// 形状圆角半径。
   final double radius;
-  final Offset offset;
+
+  /// 高斯模糊半径（SukiSU InnerShadow.radius）。
+  final double blurRadius;
+
+  /// 阴影颜色（含基础 alpha）。
   final Color color;
 
+  /// 整体不透明度（SukiSU 的 layer.alpha，pill 按压时随进度淡入）。
+  final double alpha;
+
+  /// 形状偏移量；null 时取向下一个模糊半径（阴影带在形状上侧内缘）。
+  final Offset? offset;
+
   @override
-  Widget build(BuildContext context) => SizedBox(
-    width: size.width,
-    height: size.height,
-    child: CustomPaint(
-      painter: _InnerShadowPainter(
-        radius: radius,
-        offset: offset,
-        color: color,
+  Widget build(BuildContext context) {
+    if (alpha <= 0.001 || blurRadius <= 0) return const SizedBox.shrink();
+    return SizedBox(
+      width: size.width,
+      height: size.height,
+      child: CustomPaint(
+        painter: _InnerShadowPainter(
+          radius: radius,
+          blurRadius: blurRadius,
+          offset: offset ?? Offset(0, blurRadius),
+          color: color.withValues(alpha: color.a * alpha.clamp(0.0, 1.0)),
+        ),
       ),
-    ),
-  );
+    );
+  }
 }
 
 class _InnerShadowPainter extends CustomPainter {
   _InnerShadowPainter({
     required this.radius,
+    required this.blurRadius,
     required this.offset,
     required this.color,
   });
 
   final double radius;
+  final double blurRadius;
   final Offset offset;
   final Color color;
 
   @override
   void paint(Canvas canvas, Size size) {
-    final rrect = RRect.fromRectAndRadius(
-      Offset.zero & size,
-      Radius.circular(radius),
+    final rect = Offset.zero & size;
+    final path = Path()..addRRect(
+      RRect.fromRectAndRadius(rect, Radius.circular(radius)),
     );
-    final path = Path()..addRRect(rrect);
-    canvas.saveLayer(Offset.zero & size, Paint());
-    canvas.clipPath(path);
-    canvas.drawPath(
-      path.shift(offset),
+    // 离屏层：整体高斯模糊（模糊半径即 blurRadius）。
+    canvas.saveLayer(
+      rect,
       Paint()
-        ..color = color
-        ..maskFilter = ui.MaskFilter.blur(ui.BlurStyle.normal, 8),
+        ..maskFilter = ui.MaskFilter.blur(ui.BlurStyle.normal, blurRadius),
     );
+    canvas.save();
+    canvas.clipPath(path);
+    // 形状填充，再以 Clear 混合抹除偏移后的形状 → 仅余偏移反侧的边缘带，
+    // 模糊后即为柔和内阴影（SukiSU InnerShadowNode 的图层记录逻辑）。
+    canvas.drawPath(path, Paint()..color = color);
+    canvas.drawPath(path.shift(offset), Paint()..blendMode = ui.BlendMode.clear);
+    canvas.restore();
     canvas.restore();
   }
 
   @override
   bool shouldRepaint(_InnerShadowPainter old) =>
-      old.radius != radius || old.offset != offset || old.color != color;
+      old.radius != radius ||
+      old.blurRadius != blurRadius ||
+      old.offset != offset ||
+      old.color != color;
 }
 
-/// 选中项的液态玻璃 pill：深度折射 + 色散透镜 + 容器色 + 内阴影 + 右侧高光。
+/// 选中项的液态玻璃 pill：SukiSU `FloatingBottomBar` 选中 pill 的完整移植。
+///
+/// 透镜参数、容器色、内阴影、轮廓高光全部随 [pressProgress]（0→1）线性出现：
+/// - 透镜：`lens(10dp·p, 14dp·p)` + 深度折射 + 色散 0.5（见
+///   [LiquidGlassStyle.pillAt]）；
+/// - 容器色：亮色主题黑 10% / 暗色主题白 10%，随 `1-p` 淡出，叠加黑 3%·p；
+/// - 内阴影：模糊半径 8·p、不透明度 p；
+/// - 轮廓高光：不透明度 p（静止时无高光，按压时淡入）。
 class LiquidGlassPill extends StatelessWidget {
-  const LiquidGlassPill({super.key, required this.size, this.tint});
+  const LiquidGlassPill({
+    super.key,
+    required this.size,
+    required this.pressProgress,
+    this.shapeCenter,
+  });
 
   final Size size;
-  final Color? tint;
+
+  /// 按压进度 0→1。
+  final double pressProgress;
+
+  /// 形状中心在屏幕坐标系中的位置；null 时组件自行测量（有一帧延迟）。
+  /// 滑动动画期间应由调用方逐帧传入。
+  final Offset? shapeCenter;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final isDark = theme.brightness == Brightness.dark;
-    const style = LiquidGlassStyle.pill;
-    final tintColor =
-        tint ??
-        (isDark
-            ? Colors.white.withValues(alpha: 0.10)
-            : Colors.black.withValues(alpha: 0.10));
+    final p = pressProgress.clamp(0.0, 1.0);
+    // pill 为全圆角胶囊（SukiSU CircleShape）：半径取半高。
+    final radius = size.height / 2;
+    final style = LiquidGlassStyle.pillAt(p).copyWith(cornerRadius: radius);
+    // SukiSU onDrawSurface：基础色随 (1-p) 淡出，叠加黑 3%·p。
+    final baseColor = (isDark ? Colors.white : Colors.black).withValues(
+      alpha: 0.10 * (1 - p),
+    );
+    final overlay = Colors.black.withValues(alpha: 0.03 * p);
     return SizedBox(
       width: size.width,
       height: size.height,
@@ -466,25 +607,125 @@ class LiquidGlassPill extends StatelessWidget {
             slot: 'pill',
             style: style,
             shapeSize: size,
+            shapeCenter: shapeCenter,
           ),
-          GlassTint(size: size, radius: style.cornerRadius, color: tintColor),
+          GlassTint(
+            size: size,
+            radius: radius,
+            color: baseColor,
+            overlay: p > 0.001 ? overlay : null,
+          ),
           GlassInnerShadow(
             size: size,
-            radius: style.cornerRadius,
-            offset: const Offset(0, 8),
+            radius: radius,
+            blurRadius: 8 * p,
             color: Colors.black.withValues(alpha: 0.15),
+            alpha: p,
           ),
-          GlassRimHighlight(
-            size: size,
-            radius: style.cornerRadius,
-            // SukiSU 的 pill 高光光源位于右侧。
-            lightDirection: const Offset(1, 0),
-            alpha: 0.4,
-          ),
+          if (p > 0.001)
+            GlassRimHighlight(
+              size: size,
+              radius: radius,
+              // SukiSU 的 pill 高光光源位于右侧。
+              lightDirection: const Offset(1, 0),
+              alpha: 0.5 * p,
+            ),
         ],
       ),
     );
   }
+}
+
+/// 交互辉光：SukiSU `InteractiveHighlight` 的移植。
+///
+/// 按压期间在 [position]（形状局部坐标）处叠加 additive 白光：满铺
+/// 白 6%·[progress] + 径向光斑白 12%·[progress]（半径 = 短边·1.2，
+/// smoothstep 衰减近似为 0→50% 实、50%→100% 线性衰减的渐变）。
+class InteractiveGlow extends StatelessWidget {
+  const InteractiveGlow({
+    super.key,
+    required this.size,
+    required this.position,
+    required this.progress,
+  });
+
+  final Size size;
+
+  /// 光斑中心（[size] 包围盒内的局部坐标）。
+  final Offset position;
+
+  /// 辉光进度 0→1（SukiSU：spring(0.5, 300)）。
+  final double progress;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = progress.clamp(0.0, 1.0);
+    if (p <= 0.001) return const SizedBox.shrink();
+    return SizedBox(
+      width: size.width,
+      height: size.height,
+      child: CustomPaint(
+        painter: _GlowPainter(
+          position: position,
+          fillColor: Colors.white.withValues(alpha: 0.06 * p),
+          spotColor: Colors.white.withValues(alpha: 0.12 * p),
+          radius: (size.shortestSide * 1.2).clamp(1.0, double.infinity),
+        ),
+      ),
+    );
+  }
+}
+
+class _GlowPainter extends CustomPainter {
+  _GlowPainter({
+    required this.position,
+    required this.fillColor,
+    required this.spotColor,
+    required this.radius,
+  });
+
+  final Offset position;
+  final Color fillColor;
+  final Color spotColor;
+  final double radius;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final rect = Offset.zero & size;
+    // 满铺微光（BlendMode.plus：加法叠加）。
+    canvas.drawRect(
+      rect,
+      Paint()
+        ..color = fillColor
+        ..blendMode = ui.BlendMode.plus,
+    );
+    // 跟随选中 pill 的径向光斑。
+    final center = Offset(
+      position.dx.clamp(0.0, size.width),
+      position.dy.clamp(0.0, size.height),
+    );
+    canvas.drawRect(
+      rect,
+      Paint()
+        ..blendMode = ui.BlendMode.plus
+        ..shader = ui.Gradient.radial(center, radius, [
+          spotColor,
+          spotColor,
+          const Color(0x00000000),
+        ], const [
+          0,
+          0.5,
+          1,
+        ]),
+    );
+  }
+
+  @override
+  bool shouldRepaint(_GlowPainter old) =>
+      old.position != position ||
+      old.fillColor != fillColor ||
+      old.spotColor != spotColor ||
+      old.radius != radius;
 }
 
 /// 通栏液态玻璃面板（顶栏等场景）：透镜折射 + 容器色 + 可选底边发丝线。
