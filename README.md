@@ -103,6 +103,12 @@ Flutter 多端独立短剧 / 影视应用，原名「短剧库 APP」。站源�
   - 六签名头（X-Gorgon / X-Khronos / X-Ladon / X-Argus / X-Helios / X-Medusa）以纯 Go 重写（`native/core/provider_hongguo_pure_sign.go`），含 RC4 变体、位旋转、md5 V3、hashF13、Feistel 与 AesV3，与 Node 参考实现逐项对拍一致；
   - 响应经 `fallback_api` 二次裸请求取媒体列表，`key_seed` 经双 SHA-512 派生 AES-128-CBC 密钥解密媒体地址；选流优先 H.264/HEVC 并校验 VOD 域名白名单。
 
+### 液态玻璃定位修复与底栏导航互换（0.2.70+77）
+
+- **液态玻璃定位修复**：修复玻璃效果渲染到屏幕正中、顶/底栏无变化的问题。根因是 `ImageFilter.shader` 的滤镜输入纹理恒为整屏快照（`Canvas::SaveLayer` 对 backdrop filter 的 `flood_input_coverage` 语义），旧着色器用 `u_size * 0.5` 反推形状位置必然落在屏幕中心；现新增 `u_shape_center` uniform 显式传入形状的屏幕坐标（`LiquidGlassSurface` 以后置帧回调 `localToGlobal` 动态跟踪位置，缓存键含中心点），并移除 GLES 端错误的 y 翻转（经引擎源码与实验双重确认 Impeller-GLES / Vulkan 均无需翻转）。
+- **顶栏液态玻璃**：新增 `LiquidGlassPanel` 通栏玻璃面板与 `LiquidGlassStyle.top`（直角通栏），首页顶栏在液态玻璃开启时获得与底栏一致的透镜折射质感（tint 0.45，可透视列表内容）；着色器不可用时退化为纯模糊。
+- **底栏与三点菜单互换**：底栏最右侧由「下载」改为「设置」（点按直接推设置页，不抢当前 tab 选中态），「下载」移入右上角三点菜单（仅在有下载权限时显示），TV 侧栏与桌面 Rail 同步互换。
+
 ## 安装包与平台状态
 
 | 平台 | 包与状态 |
