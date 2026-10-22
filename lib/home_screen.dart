@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 
 import 'app_layout.dart';
 import 'app_bottom_navigation.dart';
+import 'app_glass.dart';
 import 'core_bridge.dart';
 import 'catalog_filters.dart';
 import 'catalog_browser.dart';
@@ -57,6 +58,9 @@ class _HomeScreenState extends State<HomeScreen> {
   String? _error;
   int _generation = 0;
   int _tab = 0;
+  /// 底栏 / 侧栏 / Rail 中「设置」项的固定索引（与三点菜单的「下载」互换后，
+  /// 原「下载」tab 槽位改为「设置」，不再有 tab==3 的内容分支）。
+  static const _settingsNavIndex = 3;
   String _submittedQuery = '';
   final _categorySelections = <String, String>{};
   late final CatalogBrowser _browser;
@@ -676,8 +680,27 @@ class _HomeScreenState extends State<HomeScreen> {
 
   /// 连点「最近观看」6 次弹出站源密码锁（用于启用 / 关闭密码功能）。
   /// 仅多源包（真果鉴）生效；红果鉴单源包无密码功能。
+  ///
+  /// 底栏最右侧为「设置」（与三点菜单中的「下载」互换位置）：点它直接推
+  /// 设置页路由，不切换当前 tab（selectedIndex 留在原 tab，返回后原位）。
   void _onNavSelected(int tab) {
+    if (tab == _settingsNavIndex) {
+      _openSettings();
+      return;
+    }
     _changeTab(tab);
+  }
+
+  void _openSettings() {
+    Navigator.push(
+      context,
+      MaterialPageRoute<void>(
+        builder: (_) => SettingsScreen(
+          repository: widget.repository,
+          store: widget.store,
+        ),
+      ),
+    );
   }
 
   void _cancelSelection() => setState(() {
@@ -777,6 +800,40 @@ class _HomeScreenState extends State<HomeScreen> {
       _group.sources.any((source) => source.id == 'huangdou');
   bool get _hideVip => _supportsVipFilter && widget.store.hideVip;
 
+  /// 顶栏玻璃层：液态玻璃（透镜折射）优先，否则纯模糊，再否则不绘制。
+  Widget _buildTopBarGlass(
+    BuildContext context, {
+    required bool liquidGlass,
+    required bool blurred,
+  }) {
+    final colors = Theme.of(context).colorScheme;
+    if (liquidGlass) {
+      if (LiquidGlassShaders.available) {
+        return LiquidGlassPanel(
+          style: LiquidGlassStyle.top,
+          tint: colors.surface.withValues(alpha: 0.45),
+          bottomBorderColor: colors.outlineVariant.withValues(alpha: 0.4),
+        );
+      }
+      // 着色器不可用：退化为纯模糊外观（与液态玻璃关闭时一致）。
+      return ClipRect(
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: 14, sigmaY: 14),
+          child: ColoredBox(
+            color: colors.surface.withValues(alpha: 0.72),
+          ),
+        ),
+      );
+    }
+    if (!blurred) return const SizedBox.shrink();
+    return ClipRect(
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 14, sigmaY: 14),
+        child: ColoredBox(color: colors.surface.withValues(alpha: 0.72)),
+      ),
+    );
+  }
+
   List<Drama> get _visible {
     final query = _search.text.trim().toLowerCase();
     return sortCatalog(
@@ -810,24 +867,27 @@ class _HomeScreenState extends State<HomeScreen> {
         final television = AppLayout.isTelevision(context);
         final desktop = constraints.maxWidth >= 840;
         final appearance = widget.store.themeAppearance;
-        final blurredBars = appearance.blurBars && !desktop && !television;
-        final floatingBar = appearance.floatingBar && !desktop && !television;
+        final platformBars = !desktop && !television;
+        final blurredBars = appearance.blurBars && platformBars;
+        final floatingBar = appearance.floatingBar && platformBars;
+        // 液态玻璃顶栏：透镜折射替代纯模糊（需要内容延伸到顶栏之下）。
+        final topLiquidGlass = appearance.liquidGlass && platformBars;
         final scaffold = Scaffold(
-          extendBodyBehindAppBar: blurredBars,
+          extendBodyBehindAppBar: blurredBars || topLiquidGlass,
           extendBody: floatingBar || blurredBars,
           appBar: AppBar(
-            backgroundColor: blurredBars ? Colors.transparent : null,
-            elevation: blurredBars ? 0 : null,
-            scrolledUnderElevation: blurredBars ? 0 : null,
-            flexibleSpace: blurredBars
-                ? ClipRect(
-                    child: BackdropFilter(
-                      filter: ImageFilter.blur(sigmaX: 14, sigmaY: 14),
-                      child: ColoredBox(
-                        color: Theme.of(
-                          context,
-                        ).colorScheme.surface.withValues(alpha: 0.72),
-                      ),
+            backgroundColor:
+                blurredBars || topLiquidGlass ? Colors.transparent : null,
+            elevation: blurredBars || topLiquidGlass ? 0 : null,
+            scrolledUnderElevation: blurredBars || topLiquidGlass ? 0 : null,
+            flexibleSpace: blurredBars || topLiquidGlass
+                ? ValueListenableBuilder<int>(
+                    // 着色器异步就绪后重建，从纯模糊切换到液态玻璃。
+                    valueListenable: LiquidGlassShaders.ready,
+                    builder: (context, _, _) => _buildTopBarGlass(
+                      context,
+                      liquidGlass: topLiquidGlass,
+                      blurred: blurredBars,
                     ),
                   )
                 : null,
@@ -965,11 +1025,11 @@ class _HomeScreenState extends State<HomeScreen> {
                       _refreshCatalog();
                     } else if (value == 'sources') {
                       _manageSources();
-                    } else if (value == 'settings') {
+                    } else if (value == 'downloads') {
                       Navigator.push(
                         context,
                         MaterialPageRoute<void>(
-                          builder: (_) => SettingsScreen(
+                          builder: (_) => DownloadsScreen(
                             repository: widget.repository,
                             store: widget.store,
                           ),
@@ -1019,10 +1079,11 @@ class _HomeScreenState extends State<HomeScreen> {
                         child: Text('站源管理'),
                       ),
                     const PopupMenuItem(value: 'users', child: Text('用户管理')),
-                    const PopupMenuItem(
-                      value: 'settings',
-                      child: Text('设置与备份'),
-                    ),
+                    if (widget.store.canDownload)
+                      const PopupMenuItem(
+                        value: 'downloads',
+                        child: Text('下载'),
+                      ),
                     const PopupMenuItem(value: 'display', child: Text('界面模式')),
                     const PopupMenuItem(
                       value: 'about',
@@ -1060,8 +1121,7 @@ class _HomeScreenState extends State<HomeScreen> {
                             (Icons.explore_rounded, '发现'),
                             (Icons.bookmark_rounded, '追剧'),
                             (Icons.history_rounded, '最近观看'),
-                            if (widget.store.canDownload)
-                              (Icons.download_rounded, '下载'),
+                            (Icons.settings_rounded, '设置'),
                           ].indexed)
                             Padding(
                               padding: const EdgeInsets.only(bottom: 14),
@@ -1100,12 +1160,11 @@ class _HomeScreenState extends State<HomeScreen> {
                         icon: Icon(Icons.history_rounded),
                         label: Text('最近观看'),
                       ),
-                      if (widget.store.canDownload)
-                        NavigationRailDestination(
-                          icon: Icon(Icons.download_outlined),
-                          selectedIcon: Icon(Icons.download_rounded),
-                          label: Text('下载'),
-                        ),
+                      NavigationRailDestination(
+                        icon: Icon(Icons.settings_outlined),
+                        selectedIcon: Icon(Icons.settings_rounded),
+                        label: Text('设置'),
+                      ),
                     ],
                   ),
                   const VerticalDivider(width: 1, thickness: 1),
@@ -1118,12 +1177,6 @@ class _HomeScreenState extends State<HomeScreen> {
                                 message: '请联系管理员为当前用户开放站源。',
                               )
                             : _catalog(selectionInBody: desktop || television)
-                      : _tab == 3
-                      ? DownloadsScreen(
-                          repository: widget.repository,
-                          store: widget.store,
-                          embedded: true,
-                        )
                       : SavedLibrary(
                           key: ValueKey('saved-tab-$_tab'),
                           repository: widget.repository,
@@ -1168,12 +1221,11 @@ class _HomeScreenState extends State<HomeScreen> {
                       icon: Icon(Icons.history_rounded),
                       label: '最近观看',
                     ),
-                    if (widget.store.canDownload)
-                      NavigationDestination(
-                        icon: Icon(Icons.download_outlined),
-                        selectedIcon: Icon(Icons.download_rounded),
-                        label: '下载',
-                      ),
+                    NavigationDestination(
+                      icon: Icon(Icons.settings_outlined),
+                      selectedIcon: Icon(Icons.settings_rounded),
+                      label: '设置',
+                    ),
                   ],
                 ),
         );

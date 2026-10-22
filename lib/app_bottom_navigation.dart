@@ -236,8 +236,9 @@ class AppBottomNavigation extends StatelessWidget {
 
   /// 液态玻璃底栏：SukiSU-Ultra `FloatingBottomBar` 视觉的 Flutter 移植。
   ///
-  /// 玻璃面区域相对胶囊形外扩 [LiquidGlassStyle.padding]，为透镜折射提供
-  /// 可采样的真实背景；形状之外由透镜着色器裁掉（输出全透明）。
+  /// 玻璃面（透镜折射）的输入纹理恒为整屏快照，形状位置由
+  /// [LiquidGlassSurface] 自行经 `localToGlobal` 传入着色器；容器色、
+  /// 高光、选中 pill 与内容按形状尺寸叠加。
   Widget _buildLiquidGlass(
     BuildContext context,
     ThemeData theme,
@@ -262,11 +263,7 @@ class AppBottomNavigation extends StatelessWidget {
               alignment: Alignment.bottomCenter,
               children: [
                 // 玻璃面：折射背后内容（vibrancy + 模糊 + 透镜）。
-                Positioned(
-                  left: -style.padding,
-                  right: -style.padding,
-                  top: -style.padding,
-                  bottom: -style.padding,
+                Positioned.fill(
                   child: IgnorePointer(
                     child: LiquidGlassSurface(
                       slot: 'bar',

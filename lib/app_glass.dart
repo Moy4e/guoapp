@@ -19,8 +19,9 @@ import 'package:flutter/material.dart';
 /// - 选中项：独立的玻璃 pill，带深度折射、色散与内阴影
 ///   （[LiquidGlassPill]）。
 ///
-/// 渲染边界相对形状外扩 [LiquidGlassStyle.padding]，为折射提供可采样的
-/// 真实背景；形状之外的区域由着色器裁掉（输出全透明）。
+/// 着色器的滤镜输入纹理恒为整屏快照，形状在屏幕中的位置由
+/// [LiquidGlassSurface] 布局后经 `localToGlobal` 取得并传入；形状之外的
+/// 输出由着色器裁掉（全透明）。
 ///
 /// 运行环境不支持 `ImageFilter.shader`（非 Impeller 后端）或着色器加载
 /// 失败时，[LiquidGlassShaders.available] 为 false，调用方应回退到纯
@@ -36,7 +37,6 @@ class LiquidGlassStyle {
     this.chromaticAberration = 0,
     this.vibrancy = true,
     this.blurRadius = 4,
-    this.padding = 40,
   });
 
   /// 圆角半径。
@@ -60,15 +60,18 @@ class LiquidGlassStyle {
   /// 背景模糊半径。
   final double blurRadius;
 
-  /// 渲染边界相对形状的外扩量，为折射提供采样来源。
-  final double padding;
-
   /// 底栏玻璃面（SukiSU `FloatingBottomBar` 基础层参数）。
   static const bar = LiquidGlassStyle(
     cornerRadius: 30,
     refractionHeight: 24,
     refractionAmount: 24,
-    padding: 40,
+  );
+
+  /// 顶栏玻璃面：通栏直角（贴屏幕顶边），折射参数与底栏一致。
+  static const top = LiquidGlassStyle(
+    cornerRadius: 0,
+    refractionHeight: 24,
+    refractionAmount: 24,
   );
 
   /// 选中项玻璃 pill（SukiSU 拖动 pill 参数，取稳态值）。
@@ -78,7 +81,6 @@ class LiquidGlassStyle {
     refractionAmount: 14,
     depthEffect: true,
     chromaticAberration: 0.5,
-    padding: 16,
   );
 }
 
@@ -86,7 +88,7 @@ class LiquidGlassStyle {
 ///
 /// `ImageFilter.shader()` 在创建时会快照 uniform（引擎侧 `as_image_filter`
 /// 显式拷贝），因此 uniform 变化后必须重建 [ui.ImageFilter]；这里按
-/// 「样式 + 形状尺寸 + 像素比」缓存，滚动等稳态场景零分配。
+/// 「样式 + 形状尺寸 + 形状中心（屏幕坐标）+ 像素比」缓存，稳态场景零分配。
 class LiquidGlassShaders {
   LiquidGlassShaders._();
 
@@ -103,10 +105,14 @@ class LiquidGlassShaders {
   static final Map<String, _CachedFilter> _cache = {};
 
   /// 取得 [slot]（'bar' / 'pill'）对应的滤镜；不可用时返回 null。
+  ///
+  /// [shapeCenter] 为形状中心在根视图（屏幕）坐标系中的逻辑像素位置——
+  /// BackdropFilter 的滤镜输入纹理恒为整屏快照，着色器据此定位形状。
   static ui.ImageFilter? filterFor(
     String slot,
     LiquidGlassStyle style,
     Size shapeSize,
+    Offset shapeCenter,
     double dpr,
   ) {
     final program = _program;
@@ -115,8 +121,9 @@ class LiquidGlassShaders {
         '${style.cornerRadius}|${style.refractionHeight}'
         '|${style.refractionAmount}|${style.depthEffect}'
         '|${style.chromaticAberration}|${style.vibrancy}'
-        '|${style.blurRadius}|${style.padding}'
-        '|${shapeSize.width}x${shapeSize.height}|$dpr';
+        '|${style.blurRadius}'
+        '|${shapeSize.width}x${shapeSize.height}'
+        '|${shapeCenter.dx}x${shapeCenter.dy}|$dpr';
     final cached = _cache[slot];
     if (cached != null && cached.key == key) return cached.filter;
 
@@ -129,6 +136,7 @@ class LiquidGlassShaders {
         shader.getUniformFloat(name, 1).set(y);
       }
 
+      set2('u_shape_center', shapeCenter.dx * dpr, shapeCenter.dy * dpr);
       set2('u_shape_size', shapeSize.width * dpr, shapeSize.height * dpr);
       final r = style.cornerRadius * dpr;
       for (var i = 0; i < 4; i++) {
@@ -173,11 +181,18 @@ class _CachedFilter {
   final ui.ImageFilter filter;
 }
 
-/// 一片液态玻璃：对背后内容做折射，形状为以 [shapeSize] 为中心的圆角矩形。
+/// 一片液态玻璃：对背后内容做折射，形状为以 [shapeSize] 为中心（屏幕坐标）
+/// 的圆角矩形。
 ///
-/// 渲染边界 = 形状 + 两侧 [LiquidGlassStyle.padding]；本组件不绘制任何
-/// 前景，容器色、高光、内容由调用方叠加在其上。
-class LiquidGlassSurface extends StatelessWidget {
+/// 本组件不绘制任何前景，容器色、高光、内容由调用方叠加在其上。
+///
+/// 实现要点：`BackdropFilter` + `ImageFilter.shader` 的滤镜输入纹理恒为整屏
+/// 快照（引擎 `Canvas::SaveLayer` 对 backdrop filter 的 save layer 做
+/// flood_input_coverage），着色器的 `FlutterFragCoord()` 即屏幕像素坐标。
+/// 因此形状中心必须由本组件在布局完成后经 `localToGlobal` 取得并传入着色器
+/// （见 [LiquidGlassShaders.filterFor]）；首帧位置未知时不渲染，避免玻璃
+/// 闪现在错误位置。
+class LiquidGlassSurface extends StatefulWidget {
   const LiquidGlassSurface({
     super.key,
     required this.slot,
@@ -190,17 +205,50 @@ class LiquidGlassSurface extends StatelessWidget {
   final Size shapeSize;
 
   @override
+  State<LiquidGlassSurface> createState() => _LiquidGlassSurfaceState();
+}
+
+class _LiquidGlassSurfaceState extends State<LiquidGlassSurface> {
+  /// 形状中心在根视图（屏幕）坐标系中的逻辑像素位置。
+  Offset? _shapeCenter;
+
+  @override
+  void initState() {
+    super.initState();
+    // 首帧布局完成后取位置，并持续监听布局变化（键盘、旋转等）。
+    _schedulePositionUpdate();
+  }
+
+  void _schedulePositionUpdate() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final box = context.findRenderObject();
+      if (box is RenderBox && box.hasSize && box.size != Size.zero) {
+        final center = box.localToGlobal(box.size.center(Offset.zero));
+        if (_shapeCenter != center) {
+          setState(() => _shapeCenter = center);
+        }
+      }
+      // 位置可能随布局变化而改变；每帧复检（仅在变化时 setState）。
+      _schedulePositionUpdate();
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final center = _shapeCenter;
+    if (center == null) return const SizedBox.shrink();
     final filter = LiquidGlassShaders.filterFor(
-      slot,
-      style,
-      shapeSize,
+      widget.slot,
+      widget.style,
+      widget.shapeSize,
+      center,
       MediaQuery.devicePixelRatioOf(context),
     );
     if (filter == null) return const SizedBox.shrink();
     return SizedBox(
-      width: shapeSize.width + 2 * style.padding,
-      height: shapeSize.height + 2 * style.padding,
+      width: widget.shapeSize.width,
+      height: widget.shapeSize.height,
       child: BackdropFilter(
         filter: filter,
         child: const SizedBox.expand(),
@@ -409,8 +457,8 @@ class LiquidGlassPill extends StatelessWidget {
             ? Colors.white.withValues(alpha: 0.10)
             : Colors.black.withValues(alpha: 0.10));
     return SizedBox(
-      width: size.width + 2 * style.padding,
-      height: size.height + 2 * style.padding,
+      width: size.width,
+      height: size.height,
       child: Stack(
         alignment: Alignment.center,
         children: [
@@ -437,4 +485,62 @@ class LiquidGlassPill extends StatelessWidget {
       ),
     );
   }
+}
+
+/// 通栏液态玻璃面板（顶栏等场景）：透镜折射 + 容器色 + 可选底边发丝线。
+///
+/// 面板尺寸由布局约束决定；形状位置由 [LiquidGlassSurface] 自行定位。
+class LiquidGlassPanel extends StatelessWidget {
+  const LiquidGlassPanel({
+    super.key,
+    required this.style,
+    required this.tint,
+    this.slot = 'panel',
+    this.bottomBorderColor,
+  });
+
+  final LiquidGlassStyle style;
+
+  /// 容器色（罩在折射面之上）。
+  final Color tint;
+
+  /// 着色器缓存槽位标识。
+  final String slot;
+
+  /// 底边发丝线颜色（顶栏与内容的分界）。
+  final Color? bottomBorderColor;
+
+  @override
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, constraints) {
+      final size = constraints.biggest;
+      if (size.isEmpty) return const SizedBox.shrink();
+      return Stack(
+        children: [
+          Positioned.fill(
+            child: LiquidGlassSurface(
+              slot: slot,
+              style: style,
+              shapeSize: size,
+            ),
+          ),
+          Positioned.fill(
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                color: tint,
+                border: bottomBorderColor == null
+                    ? null
+                    : Border(
+                        bottom: BorderSide(
+                          color: bottomBorderColor!,
+                          width: 0.5,
+                        ),
+                      ),
+              ),
+            ),
+          ),
+        ],
+      );
+    },
+  );
 }

@@ -11,12 +11,22 @@
 // （形状外输出全透明），扩张区域只为给折射提供可采样的背景内容。
 //
 // 注意：ImageFilter.shader 要求第一个 uniform 为 vec2（引擎注入绑定纹理尺寸），
-// 且至少一个 sampler2D（引擎注入滤镜输入）。GLES 后端纹理 y 轴朝向相反，
-// 采样前需翻转。
+// 且至少一个 sampler2D（引擎注入滤镜输入）。
+//
+// 坐标空间（经 flutter/engine impeller/display_list/canvas.cc 与
+// entity/contents/filters/runtime_effect_filter_contents.cc 验证）：
+// BackdropFilter 的 save layer 因 flood_input_coverage 恒扩展到整屏，滤镜输入
+// 纹理即整屏快照，故 u_size = 整屏尺寸（设备像素）、FlutterFragCoord() =
+// 屏幕像素坐标（左上为原点，y 向下）。玻璃形状在屏幕中的位置由调用方经
+// u_shape_center 显式传入，不能由 u_size 反推（早期版本误将形状居中到纹理
+// 中心，导致玻璃渲染到屏幕正中）。Impeller 的 GLES 与 Vulkan 后端采样该输入
+// 纹理均无需翻转 y（已用 Impeller-GLES 端到端验证；引擎自带滤镜测试夹具
+// runtime_stage_filter_*.frag 同样不翻转）。
 
 #include <flutter/runtime_effect.glsl>
 
-uniform vec2 u_size;                // 引擎注入：绑定纹理尺寸（玻璃区域，设备像素）
+uniform vec2 u_size;                // 引擎注入：绑定纹理尺寸（整屏，设备像素）
+uniform vec2 u_shape_center;        // 玻璃形状中心在输入纹理（屏幕）中的位置，设备像素
 uniform vec2 u_shape_size;          // 玻璃形状（胶囊）的尺寸，设备像素
 uniform vec4 u_corner_radii;        // 圆角半径：左上、右上、右下、左下，设备像素
 uniform float u_refraction_height;  // 折射作用的边缘带宽度，设备像素
@@ -62,11 +72,8 @@ float circleMap(float x) {
 }
 
 vec2 texCoordOf(vec2 coord) {
-    vec2 uv = coord / u_size;
-    #ifdef IMPELLER_TARGET_OPENGLES
-        uv.y = 1.0 - uv.y;
-    #endif
-    return uv;
+    // 输入纹理与 FlutterFragCoord 同为屏幕坐标系（y 向下），直接归一化即可。
+    return coord / u_size;
 }
 
 vec3 applyVibrancy(vec3 color) {
@@ -98,9 +105,8 @@ vec4 sampleBackground(vec2 coord) {
 
 void main() {
     vec2 coord = FlutterFragCoord().xy;
-    vec2 regionCenter = u_size * 0.5;
+    vec2 centeredCoord = coord - u_shape_center;
     vec2 halfShape = u_shape_size * 0.5;
-    vec2 centeredCoord = coord - regionCenter;
 
     float radius = radiusAt(centeredCoord, u_corner_radii);
     float sd = sdRoundedRect(centeredCoord, halfShape, radius);
