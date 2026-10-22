@@ -2,6 +2,8 @@ import 'dart:ui';
 
 import 'package:flutter/material.dart';
 
+import 'app_glass.dart';
+
 /// 底部导航。可选悬浮胶囊 + 毛玻璃/液态玻璃外观；
 /// 选中项使用圆形高亮（HyperOS 风格），不再使用顶部横条。
 class AppBottomNavigation extends StatelessWidget {
@@ -25,14 +27,23 @@ class AppBottomNavigation extends StatelessWidget {
   /// 底栏背景模糊（需要 Scaffold 开启 extendBody 才能看到内容）。
   final bool blurred;
 
-  /// 液态玻璃：更强模糊 + 渐变高光边框。
+  /// 液态玻璃：SukiSU-Ultra 风格的透镜折射玻璃（见 [LiquidGlassStyle]）。
   final bool liquidGlass;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) => ValueListenableBuilder<int>(
+    // 着色器异步就绪后重建，从回退外观切换到液态玻璃。
+    valueListenable: LiquidGlassShaders.ready,
+    builder: (context, _, _) => _buildContent(context),
+  );
+
+  Widget _buildContent(BuildContext context) {
     final theme = Theme.of(context);
     final colors = theme.colorScheme;
-    final glass = blurred || liquidGlass;
+    // 液态玻璃需要透镜着色器；不可用时回退纯 Flutter 毛玻璃外观。
+    final useLiquidGlass =
+        liquidGlass && floating && LiquidGlassShaders.available;
+    final glass = useLiquidGlass || blurred;
     final radius = floating ? 30.0 : 0.0;
 
     Widget bar = Row(
@@ -70,7 +81,9 @@ class AppBottomNavigation extends StatelessWidget {
                               vertical: 6,
                             ),
                             decoration: BoxDecoration(
-                              color: index == selectedIndex
+                              // 液态玻璃的选中 pill 已承担高亮职责。
+                              color:
+                                  index == selectedIndex && !useLiquidGlass
                                   ? colors.primary.withValues(alpha: 0.12)
                                   : Colors.transparent,
                               borderRadius: BorderRadius.circular(22),
@@ -116,6 +129,10 @@ class AppBottomNavigation extends StatelessWidget {
           ),
       ],
     );
+
+    if (useLiquidGlass) {
+      return _buildLiquidGlass(context, theme, colors, bar);
+    }
 
     if (glass) {
       bar = ClipRRect(
@@ -212,6 +229,106 @@ class AppBottomNavigation extends StatelessWidget {
             ),
           ),
           child: bar,
+        ),
+      ),
+    );
+  }
+
+  /// 液态玻璃底栏：SukiSU-Ultra `FloatingBottomBar` 视觉的 Flutter 移植。
+  ///
+  /// 玻璃面区域相对胶囊形外扩 [LiquidGlassStyle.padding]，为透镜折射提供
+  /// 可采样的真实背景；形状之外由透镜着色器裁掉（输出全透明）。
+  Widget _buildLiquidGlass(
+    BuildContext context,
+    ThemeData theme,
+    ColorScheme colors,
+    Widget bar,
+  ) {
+    const barHeight = 70.0;
+    const barRadius = 30.0;
+    const pillHeight = 56.0;
+    const style = LiquidGlassStyle.bar;
+    final isDark = theme.brightness == Brightness.dark;
+    return SafeArea(
+      top: false,
+      minimum: const EdgeInsets.fromLTRB(18, 0, 18, 14),
+      child: SizedBox(
+        height: barHeight,
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final barSize = Size(constraints.maxWidth, barHeight);
+            return Stack(
+              clipBehavior: Clip.none,
+              alignment: Alignment.bottomCenter,
+              children: [
+                // 玻璃面：折射背后内容（vibrancy + 模糊 + 透镜）。
+                Positioned(
+                  left: -style.padding,
+                  right: -style.padding,
+                  top: -style.padding,
+                  bottom: -style.padding,
+                  child: IgnorePointer(
+                    child: LiquidGlassSurface(
+                      slot: 'bar',
+                      style: style,
+                      shapeSize: barSize,
+                    ),
+                  ),
+                ),
+                // 容器色与投影（SukiSU：surfaceContainer @ 0.4 + dropShadow）。
+                Positioned.fill(
+                  child: IgnorePointer(
+                    child: GlassTint(
+                      size: barSize,
+                      radius: barRadius,
+                      color: colors.surfaceContainer.withValues(alpha: 0.4),
+                      shadowColor: Colors.black.withValues(
+                        alpha: isDark ? 0.2 : 0.1,
+                      ),
+                    ),
+                  ),
+                ),
+                // 轮廓高光（SukiSU：BloomStroke，光源位于左侧）。
+                Positioned.fill(
+                  child: IgnorePointer(
+                    child: GlassRimHighlight(
+                      size: barSize,
+                      radius: barRadius,
+                      lightDirection: const Offset(-1, 0),
+                      alpha: 0.6,
+                    ),
+                  ),
+                ),
+                // 选中项玻璃 pill，位于内容之下。
+                Positioned.fill(
+                  child: LayoutBuilder(
+                    builder: (context, pillConstraints) {
+                      final tabWidth =
+                          pillConstraints.maxWidth / destinations.length;
+                      final pillWidth = tabWidth - 4;
+                      if (pillWidth <= 0) return const SizedBox.shrink();
+                      return Stack(
+                        children: [
+                          Positioned(
+                            left: selectedIndex * tabWidth + 2,
+                            top: (barHeight - pillHeight) / 2,
+                            width: pillWidth,
+                            height: pillHeight,
+                            child: IgnorePointer(
+                              child: LiquidGlassPill(
+                                size: Size(pillWidth, pillHeight),
+                              ),
+                            ),
+                          ),
+                        ],
+                      );
+                    },
+                  ),
+                ),
+                Positioned.fill(child: bar),
+              ],
+            );
+          },
         ),
       ),
     );

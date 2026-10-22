@@ -63,4 +63,29 @@ void main() {
     expect(find.byIcon(Icons.history_rounded), findsOneWidget);
     expect(find.byIcon(Icons.download_outlined), findsOneWidget);
   });
+
+  testWidgets('液态玻璃底栏在着色器不可用时回退且渲染完整', (tester) async {
+    // 测试环境无 Impeller，ImageFilter.shader 不可用：应走纯 Flutter 回退，
+    // 图标、标签与选中项均正常渲染，不抛异常。
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          bottomNavigationBar: AppBottomNavigation(
+            selectedIndex: 1,
+            onDestinationSelected: (_) {},
+            destinations: await destinations(),
+            floating: true,
+            blurred: true,
+            liquidGlass: true,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    for (final label in ['发现', '追剧', '最近观看', '下载']) {
+      expect(find.text(label), findsOneWidget);
+    }
+    expect(find.byIcon(Icons.bookmark_rounded), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
 }

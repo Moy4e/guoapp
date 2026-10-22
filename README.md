@@ -90,6 +90,19 @@ Flutter 多端独立短剧 / 影视应用，原名「短剧库 APP」。站源�
 - **液态玻璃界面**：新增主题设置页（液态玻璃模糊、悬浮底栏、深浅色、界面缩放），设置页加入后台缓存优化，底栏与首页改为玻璃质感导航。
 - **剔除**：上游分支中误提交的工作产物（记忆文件、验证截图、中文说明文档）未纳入本仓库。
 
+### 设置页 Material 化、液态玻璃移植与红果取流修复（0.2.69+76）
+
+- **设置页 UI 统一为 Flutter Material 风格**：主题设置页不再依赖 `flutter_miuix`（该依赖已从工程移除），改用标准 Material 组件——`Scaffold` / `AppBar` / `ChoiceChip`（主题三选）/ `SwitchListTile.adaptive` / `Slider.adaptive` / `ScaffoldMessenger`，排布与「播放器与手势」等设置页保持一致；模糊、悬浮底栏、液态玻璃、返回手势、界面缩放四组功能与联动规则不变。
+- **液态玻璃效果改用 SukiSU-Ultra 实现**：视觉算法移植自 [SukiSU-Ultra](https://github.com/ShirkNeko/SukiSU-Ultra)（`ui/component/liquid` 与 `FloatingBottomBar.kt`，上游 [AndroidLiquidGlass](https://github.com/Kyant0/AndroidLiquidGlass)，Apache-2.0）：
+  - 新增透镜折射着色器 `shaders/liquid_glass.frag`，经 `BackdropFilter` + `ImageFilter.shader` 对底栏背后内容做**圆角矩形边缘透镜折射**（圆角 SDF + circleMap 位移），选中项 pill 额外带**深度折射与色散**；
+  - 玻璃面叠加饱和度提升（vibrancy 1.5×）与轻度模糊，容器色 `surfaceContainer @ 0.4`，轮廓为方向光高光描边（BloomStroke 简化移植），选中 pill 带内阴影，整体投影 10dp；
+  - 玻璃渲染区相对胶囊形外扩 40dp 为折射提供真实背景采样，形状之外由着色器裁掉；
+  - 运行环境不支持 `ImageFilter.shader`（非 Impeller 后端）或着色器加载失败时，自动回退到纯 Flutter 毛玻璃外观，功能不受影响。
+- **红果取流修复（服务端风控旧链路）**：旧 `video_model` 接口与五签名头已被风控（任何请求均返回空 body），改为移植 [hongguo-web](https://github.com/sunnysky123/hongguo-web) 的新链路：
+  - `POST /novel/player/multi_video_model/v1/`，完整合成真机设备参数（28 字段保序）与 python 风格 URL 编码；
+  - 六签名头（X-Gorgon / X-Khronos / X-Ladon / X-Argus / X-Helios / X-Medusa）以纯 Go 重写（`native/core/provider_hongguo_pure_sign.go`），含 RC4 变体、位旋转、md5 V3、hashF13、Feistel 与 AesV3，与 Node 参考实现逐项对拍一致；
+  - 响应经 `fallback_api` 二次裸请求取媒体列表，`key_seed` 经双 SHA-512 派生 AES-128-CBC 密钥解密媒体地址；选流优先 H.264/HEVC 并校验 VOD 域名白名单。
+
 ## 安装包与平台状态
 
 | 平台 | 包与状态 |
