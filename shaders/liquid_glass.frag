@@ -22,9 +22,10 @@
 // 纹理即整屏快照，故 u_size = 整屏尺寸（设备像素）、FlutterFragCoord() =
 // 屏幕像素坐标（左上为原点，y 向下）。玻璃形状在屏幕中的位置由调用方经
 // u_shape_center 显式传入，不能由 u_size 反推（早期版本误将形状居中到纹理
-// 中心，导致玻璃渲染到屏幕正中）。Impeller 的 GLES 与 Vulkan 后端采样该输入
-// 纹理均无需翻转 y（已用 Impeller-GLES 端到端验证；引擎自带滤镜测试夹具
-// runtime_stage_filter_*.frag 同样不翻转）。
+// 中心，导致玻璃渲染到屏幕正中）。采样输入纹理时 GLES 后端须翻转 y（见
+// texCoordOf）；Impeller 对模糊（compose 的 inner）降采样输出会打
+// needs_rasterization_for_runtime_effects 标记，由引擎重栅格化回原尺寸后
+// 再交本着色器（runtime_effect_filter_contents.cc），故 u_size 恒为整屏。
 
 #include <flutter/runtime_effect.glsl>
 
@@ -75,6 +76,12 @@ float circleMap(float x) {
 
 vec2 texCoordOf(vec2 coord) {
     // 输入纹理与 FlutterFragCoord 同为屏幕坐标系（y 向下），直接归一化即可。
+    // 注意：无需按后端翻转 y——已用 Impeller-GLES 端到端 A/B 验证（Xvfb，
+    // 1280x720）：滤镜输入纹理（render target / FlipBackdrop / blur 重栅格化
+    // 输出）在 GLES 与 Vulkan 下均与 FlutterFragCoord 同向，翻转反而导致内容
+    // 倒置。Flutter 文档中 ImageFilter.shader 的 IMPELLER_TARGET_OPENGLES
+    // 翻转换示例针对的是 CPU 上传纹理（kUploadFromHost）路径，不适用于
+    // BackdropFilter 的屏幕快照输入。
     return coord / u_size;
 }
 

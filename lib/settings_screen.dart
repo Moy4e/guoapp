@@ -36,9 +36,14 @@ class SettingsScreen extends StatefulWidget {
     super.key,
     required this.repository,
     required this.store,
+    this.embedded = false,
   });
   final AppRepository repository;
   final LocalStore store;
+
+  /// 内嵌为一级 tab 页面（由首页底栏直接切入，不再作为二级路由 push）：
+  /// 不再自绘 AppBar 与返回按钮，顶栏由宿主页面提供。
+  final bool embedded;
   @override
   State<SettingsScreen> createState() => _SettingsScreenState();
 }
@@ -95,12 +100,24 @@ class _SettingsScreenState extends State<SettingsScreen> {
             return _backgroundCache!;
           }
           final child = Scaffold(
-            appBar: AppBar(title: const Text('设置与备份')),
+            appBar: widget.embedded
+                ? null
+                : AppBar(title: const Text('设置与备份')),
             body: Center(
               child: ConstrainedBox(
                 constraints: const BoxConstraints(maxWidth: 720),
                 child: ListView(
-                  padding: const EdgeInsets.all(16),
+                  // 内嵌为一级 tab 时底部补偿悬浮底栏高度（extendBody 时
+                  // MediaQuery.padding.bottom = 底栏高度），避免列表尾部被遮挡。
+                  padding: EdgeInsets.fromLTRB(
+                    16,
+                    16,
+                    16,
+                    16 +
+                        (widget.embedded
+                            ? MediaQuery.paddingOf(context).bottom
+                            : 0),
+                  ),
                   children: [
                     ListTile(
                       key: const ValueKey('lan-settings'),

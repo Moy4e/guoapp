@@ -116,6 +116,15 @@ Flutter 多端独立短剧 / 影视应用，原名「短剧库 APP」。站源�
 - **逐行核对确认无偏差项**：负折射符号（`refractionAmount` 取负）与我方一致；vibrancy（`saturation 1.5×`）等价；辉光层级（bar 高光 0.75 → InteractiveHighlight → 隐形行捕获 → pill 最上层）与 SukiSU `FloatingBottomBar.kt` 的 `combinedBackdrop` 语义一致。
 - **动效核对**：指针 / 六弹簧（press、value、scaleX/Y、velocity）与 `DampedDragAnimation.kt` 逐条一致（velocity = 速度 / span 且每帧 snap、release 待 |value-target| < span·0.025 才归零按压与缩放）；色散 A/B 与透镜位移经截图量化验证（色散仅激活于透镜带、右缘位移 ~7-8px）。
 
+### 页面切换滑动化与桌面鼠标拖拽支持（0.2.72+79）
+
+- **底栏 tab 点按平滑滑动**：移动端内容区由直接切换改为 `PageView`，点按底栏 tab 时内容区以 320ms `easeOutCubic` 平滑滑到目标页（类左右刷浏览图片体验），底栏高亮即时同步。
+- **内容区左右划切换**：`PageView.onPageChanged` 驱动底栏高亮，内容区支持左右划跟手切换，与底栏双向同步；小距离拖动（不足半页）弹回原页。
+- **桌面鼠标拖拽支持**：Flutter 默认 `ScrollBehavior.dragDevices` 不含 `PointerDeviceKind.mouse`（拖拽手势预留给文本选择），导致 Windows / Linux 桌面版鼠标无法滑动切换页面；新增 `_PageSwipeBehavior` 显式纳入鼠标，使桌面端与触屏、触控板行为一致。
+- **发现页去滑动冲突**：移除发现页左右划切换剧集类目的手势，避免与页面滑动手势冲突。
+- **设置一级化**：设置与其他 tab 同为一级页面（有底栏、无左上返回按钮），非 push 二级界面。
+- **药丸通透修复**：液态玻璃选中 pill 移除 `vibrancy` 与 `blurRadius`（仅透镜折射），达到「透明且边缘光线扭曲」的通透效果。
+
 ## 安装包与平台状态
 
 | 平台 | 包与状态 |

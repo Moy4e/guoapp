@@ -96,8 +96,13 @@ class LiquidGlassStyle {
     refractionAmount: 24,
   );
 
-  /// 选中项玻璃 pill 的**按压动画**参数（SukiSU 拖动 pill 参数，随按压
-  /// 进度 0→1 线性出现）：lens(10dp·p, 14dp·p) + depthEffect + 色散。
+  /// 选中项玻璃 pill 的**按压动画**参数（Kyant0 / SukiSU 拖动 pill 参数，
+  /// 随按压进度 0→1 线性出现）：lens(10dp·p, 14dp·p) + depthEffect + 色散。
+  ///
+  /// **药丸仅透镜，无 blur / vibrancy**：Kyant0 `LiquidBottomTabs` 与
+  /// SukiSU `FloatingBottomBar` 的选中 pill 均只挂 `lens(...)`——模糊只属于
+  /// 底栏玻璃面。若药丸也模糊，透镜采样的是已抹平高频的模糊内容，边缘扭曲
+  /// 不可见，且图标会被「底栏 blur + 药丸 blur」二次糊成团，失去通透感。
   /// 色散对齐 Kyant0：作布尔量启用，着色器 uniform 传 1f。
   static LiquidGlassStyle pillAt(double pressProgress) {
     final p = pressProgress.clamp(0.0, 1.0);
@@ -107,6 +112,8 @@ class LiquidGlassStyle {
       refractionAmount: 14 * p,
       depthEffect: true,
       chromaticAberration: 1,
+      vibrancy: false,
+      blurRadius: 0,
     );
   }
 }

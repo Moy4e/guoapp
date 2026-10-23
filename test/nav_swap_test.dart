@@ -12,7 +12,7 @@ import 'fixtures.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  testWidgets('settings lives at the bottom nav right edge and downloads moved '
+  testWidgets('settings is a first-class bottom nav tab and downloads moved '
       'into the overflow menu', (tester) async {
     tester.view.physicalSize = const Size(390, 844);
     tester.view.devicePixelRatio = 1;
@@ -32,17 +32,24 @@ void main() {
     expect(find.text('设置'), findsOneWidget);
     expect(find.text('下载'), findsNothing);
 
-    // 停在「追剧」tab，点底栏「设置」直接推设置页。
-    await tester.tap(find.byKey(const ValueKey('bottom-nav-1')));
-    await tester.pumpAndSettle();
+    // 点底栏「设置」直接切入设置 tab 内容区（一级页面，非 push 路由）。
     await tester.tap(find.byKey(const ValueKey('bottom-nav-3')));
     await tester.pumpAndSettle();
     expect(find.byType(SettingsScreen), findsOneWidget);
+    expect(
+      tester
+          .widget<AppBottomNavigation>(find.byType(AppBottomNavigation))
+          .selectedIndex,
+      3,
+    );
 
-    // 返回后底栏选中态仍留在「追剧」——设置是路由推送，不抢 tab。
-    await tester.tap(find.byType(BackButton).last);
+    // 一级页面：无左上返回按钮，设置项直接呈现。
+    expect(find.byType(BackButton), findsNothing);
+    expect(find.text('设备互联'), findsOneWidget);
+
+    // 点底栏「追剧」切回，底栏选中态跟随。
+    await tester.tap(find.byKey(const ValueKey('bottom-nav-1')));
     await tester.pumpAndSettle();
-    expect(find.byType(SettingsScreen), findsNothing);
     expect(
       tester
           .widget<AppBottomNavigation>(find.byType(AppBottomNavigation))
@@ -50,11 +57,10 @@ void main() {
       1,
     );
 
-    // 「下载」搬到右上角三点菜单，点它推下载页。
+    // 「下载」仍在右上角三点菜单，点它推下载页。
     await tester.tap(find.byTooltip('更多'));
     await tester.pumpAndSettle();
     expect(find.text('下载'), findsOneWidget);
-    expect(find.text('设置与备份'), findsNothing);
     await tester.tap(find.text('下载'));
     await tester.pumpAndSettle();
     expect(find.byType(DownloadsScreen), findsOneWidget);
