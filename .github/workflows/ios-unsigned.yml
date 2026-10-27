@@ -1,0 +1,62 @@
+name: Build iOS unsigned IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - codex/ci-pr14-ios-build
+
+permissions:
+  contents: read
+
+jobs:
+  build-ios:
+    runs-on: macos-15
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: '3.47.4'
+          cache: true
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: native/go.mod
+          cache-dependency-path: native/go.sum
+
+      - name: Ensure CocoaPods is available
+        shell: bash
+        run: |
+          if ! command -v pod >/dev/null 2>&1; then
+            brew install cocoapods
+          fi
+
+      - name: Show build tool versions
+        run: |
+          flutter --version
+          go version
+          xcodebuild -version
+          pod --version
+
+      - name: Build red-fruit iOS package without signing
+        env:
+          GOPROXY: https://proxy.golang.org,direct
+          GOSUMDB: off
+        run: python3 scripts/build_ios.py
+
+      - name: Upload unsigned iOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: hongguojian-ios-pr14-0.2.72-79
+          if-no-files-found: error
+          path: |
+            dist/ios/hongguojian-*-ios-unsigned.ipa
+            dist/ios/hongguojian-*-ios-unsigned-app.zip
+            dist/ios/SHA256SUMS.txt
